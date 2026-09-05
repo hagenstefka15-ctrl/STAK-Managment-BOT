@@ -1,0 +1,32 @@
+{
+  "staff": {
+    "1212368493027262504": {
+      "inDuty": false,
+      "onBreak": false,
+      "shiftStart": null,
+      "totalTime": 45467,
+      "daily": {
+        "2026-08-29": 45467
+      },
+      "weekly": {
+        "2026-08-24": 45467
+      },
+      "monthly": {
+        "2026-08": 45467
+      },
+      "shifts": 2
+    },
+    "1540767288532144208": {
+      "inDuty": false,
+      "onBreak": false,
+      "shiftStart": null,
+      "totalTime": 0,
+      "daily": {},
+      "weekly": {},
+      "monthly": {},
+      "shifts": 0
+    }
+  },
+  "panelChannelId": "1542546805945008218",
+  "panelMessageId": "1543246940429615115"
+}

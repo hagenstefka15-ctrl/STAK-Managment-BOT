@@ -1,0 +1,172 @@
+{
+  "staff": {
+    "1212368493027262504": {
+      "inDuty": false,
+      "onBreak": false,
+      "shiftStart": null,
+      "daily": {
+        "2026-08-29": 4002312
+      },
+      "weekly": {
+        "2026-08-24": 4002312
+      },
+      "monthly": {
+        "2026-08": 4002312
+      },
+      "shifts": 11
+    },
+    "1484549338104463522": {
+      "inDuty": false,
+      "onBreak": false,
+      "shiftStart": null,
+      "daily": {
+        "2026-08-29": 7790893
+      },
+      "weekly": {
+        "2026-08-24": 7790893
+      },
+      "monthly": {
+        "2026-08": 7790893
+      },
+      "shifts": 1
+    },
+    "1188827375144812574": {
+      "inDuty": false,
+      "onBreak": false,
+      "shiftStart": null,
+      "daily": {
+        "2026-08-29": 3576086
+      },
+      "weekly": {
+        "2026-08-24": 3576086
+      },
+      "monthly": {
+        "2026-08": 3576086
+      },
+      "shifts": 1
+    },
+    "1383881845288210564": {
+      "inDuty": true,
+      "onBreak": false,
+      "shiftStart": 1788029792791,
+      "daily": {
+        "2026-08-29": 7843
+      },
+      "weekly": {
+        "2026-08-24": 7843
+      },
+      "monthly": {
+        "2026-08": 7843
+      },
+      "shifts": 2
+    },
+    "1412075960324460679": {
+      "inDuty": true,
+      "onBreak": false,
+      "shiftStart": 1788030342037,
+      "daily": {
+        "2026-08-29": 453794
+      },
+      "weekly": {
+        "2026-08-24": 453794
+      },
+      "monthly": {
+        "2026-08": 453794
+      },
+      "shifts": 2
+    },
+    "1256967475493343336": {
+      "inDuty": false,
+      "onBreak": false,
+      "shiftStart": null,
+      "daily": {},
+      "weekly": {},
+      "monthly": {},
+      "shifts": 0
+    },
+    "1284515074936930325": {
+      "inDuty": false,
+      "onBreak": false,
+      "shiftStart": null,
+      "daily": {
+        "2026-08-29": 505903
+      },
+      "weekly": {
+        "2026-08-24": 505903
+      },
+      "monthly": {
+        "2026-08": 505903
+      },
+      "shifts": 1
+    },
+    "1125027938690150450": {
+      "inDuty": true,
+      "onBreak": false,
+      "shiftStart": 1788030711835,
+      "daily": {},
+      "weekly": {},
+      "monthly": {},
+      "shifts": 1
+    }
+  },
+  "players": {
+    "minatonato4554::ka": {
+      "ingameUsername": "Minatonato4554",
+      "discordUsername": "KA",
+      "discordId": "1383881845288210564",
+      "notes": "VDM",
+      "cases": [],
+      "createdAt": "29/08/2026, 21:02:31",
+      "createdBy": "gamingfinnder1",
+      "createdById": "1383881845288210564"
+    },
+    ".::.": {
+      "ingameUsername": ".",
+      "discordUsername": ".",
+      "discordId": "1212368493027262504",
+      "notes": "",
+      "cases": [],
+      "createdAt": "29/08/2026, 21:26:56",
+      "createdBy": "elementary_0405",
+      "createdById": "1212368493027262504"
+    },
+    "maik_qw12::-": {
+      "ingameUsername": "Maik_qw12",
+      "discordUsername": "-",
+      "discordId": "1125027938690150450",
+      "notes": "",
+      "cases": [
+        {
+          "caseNumber": "STAK-0006",
+          "type": "Kick",
+          "game": "Roblox SRP",
+          "action": "Hat am Spawn mit taser herumgechossen",
+          "reason": "hatte schon zwei Warns",
+          "notes": "",
+          "createdBy": "lionel4294",
+          "createdById": "1125027938690150450",
+          "createdAt": "29/08/2026, 21:28:00",
+          "date": "29/08/2026, 21:28:00"
+        }
+      ],
+      "createdAt": "29/08/2026, 21:27:01",
+      "createdBy": "lionel4294",
+      "createdById": "1125027938690150450"
+    },
+    "ossi15282::unbekannt": {
+      "ingameUsername": "Ossi15282",
+      "discordUsername": "Unbekannt",
+      "discordId": "1412075960324460679",
+      "notes": "Schießt auf einen Rettungshelikopter",
+      "cases": [],
+      "createdAt": "29/08/2026, 21:33:27",
+      "createdBy": "designerpaul",
+      "createdById": "1412075960324460679"
+    }
+  },
+  "nextCaseNumber": 7,
+  "activityPanelChannelId": "1542546805945008218",
+  "activityPanelMessageId": "1543324710434242622",
+  "casePanelChannelId": "1543252998514409532",
+  "casePanelMessageId": "1543253468884631593"
+}
