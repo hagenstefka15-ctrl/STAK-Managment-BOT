@@ -1,6 +1,7 @@
 'use strict';
 
 require('dotenv').config();
+
 /**
  * STAK Management — Final
  * Node.js + discord.js v14 + PostgreSQL
@@ -252,13 +253,11 @@ async function migrate() {
       ends_at TIMESTAMPTZ NOT NULL,
       description TEXT,
       requirements TEXT,
-      mode TEXT NOT NULL DEFAULT 'raffle',
       entrants JSONB NOT NULL DEFAULT '[]'::jsonb,
       ended BOOLEAN NOT NULL DEFAULT FALSE,
       created_by TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-    ALTER TABLE stak_giveaways ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'raffle';
     CREATE TABLE IF NOT EXISTS stak_youtube_channels (
       guild_id TEXT NOT NULL,
       channel_id TEXT NOT NULL,
@@ -333,11 +332,6 @@ async function patchSettings(patch) {
 function isAdmin(memberOrInteraction) {
   const member = memberOrInteraction.member;
   return Boolean(member?.permissions?.has(PermissionFlagsBits.Administrator));
-}
-
-function isStaffAccess(memberOrInteraction) {
-  const member = memberOrInteraction.member;
-  return Boolean(member?.permissions?.has(PermissionFlagsBits.Administrator) || member?.permissions?.has(PermissionFlagsBits.ManageMessages) || member?.permissions?.has(PermissionFlagsBits.ManageGuild));
 }
 
 function isOwner(interaction) {
@@ -476,15 +470,8 @@ async function createBackup(guild, kind = 'manual', label = null, actorId = null
       })));
     } catch {}
   }
-  const webhooks = [];
-  for (const channel of guild.channels.cache.values()) {
-    if (!channel.isTextBased?.()) continue;
-    const hooks = await channel.fetchWebhooks().catch(() => new Collection());
-    for (const hook of hooks.values()) webhooks.push({ channelId: channel.id, name: hook.name, type: hook.type });
-  }
-
   const snapshot = {
-    version: 3,
+    version: 2,
     createdAt: new Date().toISOString(),
     guild: {
       id: guild.id, name: guild.name, description: guild.description, verificationLevel: guild.verificationLevel,
@@ -492,7 +479,7 @@ async function createBackup(guild, kind = 'manual', label = null, actorId = null
       afkChannelId: guild.afkChannelId, afkTimeout: guild.afkTimeout, systemChannelId: guild.systemChannelId,
       rulesChannelId: guild.rulesChannelId, publicUpdatesChannelId: guild.publicUpdatesChannelId,
     },
-    roles, channels, emojis, stickers, bannedUsers, members, recentMessages, webhooks,
+    roles, channels, emojis, stickers, bannedUsers, members, recentMessages,
     limitations: ['Discord does not allow bots to recreate historical messages as their original authors or preserve original message IDs/timestamps. Recent messages are archived as data for reference/recovery.'],
   };
   const row = await one(`INSERT INTO stak_backups(guild_id,kind,label,snapshot,created_by)
@@ -522,7 +509,7 @@ async function restoreBackup(guild, backup) {
     if (!target) {
       try { target = await guild.roles.create({ name: role.name, color: role.color, hoist: role.hoist, mentionable: role.mentionable, permissions: BigInt(role.permissions) }); } catch {}
     } else {
-      // Existing role is kept untouched. Restore only fills missing resources.
+      try { await target.edit({ name: role.name, color: role.color, hoist: role.hoist, mentionable: role.mentionable, permissions: BigInt(role.permissions) }); } catch {}
     }
     if (target) roleMap.set(role.id, target.id);
   }
@@ -538,60 +525,19 @@ async function restoreBackup(guild, backup) {
     let target = existingChannels.get(c.id) || existingChannels.find(x => x.type === c.type && x.name === c.name);
     const parentId = c.parentId ? (channelMap.get(c.parentId) || null) : null;
     const payload = { name: c.name, type: c.type, parent: parentId, topic: c.topic ?? undefined, nsfw: c.nsfw, rateLimitPerUser: c.rateLimitPerUser };
-    const created = !target;
     if (!target) { try { target = await guild.channels.create(payload); } catch {} }
-    // Existing channels are deliberately left untouched during a restore.
-    if (target) {
-      channelMap.set(c.id, target.id);
-      if (created && Array.isArray(c.permissionOverwrites)) {
-        for (const ow of c.permissionOverwrites) {
-          const subjectId = ow.id === guild.id ? guild.id : (roleMap.get(ow.id) || ow.id);
-          await target.permissionOverwrites.edit(subjectId, { allow: BigInt(ow.allow), deny: BigInt(ow.deny) }).catch(() => {});
-        }
-      }
-    }
+    else { try { await target.edit(payload); } catch {} }
+    if (target) channelMap.set(c.id, target.id);
   }
   for (const member of s.members || []) {
     const live = await guild.members.fetch(member.id).catch(() => null);
     if (!live) continue;
     const mapped = (member.roles || []).map(id => roleMap.get(id)).filter(Boolean);
-    if (mapped.length) {
-      const missing = mapped.filter(id => !live.roles.cache.has(id));
-      if (missing.length) await live.roles.add(missing).catch(() => {});
-    }
+    try { await live.roles.set(mapped); } catch {}
   }
-  const currentBans = await guild.bans.fetch().catch(() => new Collection());
   for (const banned of s.bannedUsers || []) {
-    if (!currentBans.has(banned.id)) await guild.members.ban(banned.id, { reason: `Restored from STAK backup ${backup.id}` }).catch(() => null);
+    if (!guild.bans.cache.has(banned.id)) await guild.members.ban(banned.id, { reason: `Restored from STAK backup ${backup.id}` }).catch(() => null);
   }
-  for (const hook of s.webhooks || []) {
-    const channel = await guild.channels.fetch(hook.channelId).catch(() => null);
-    if (!channel?.isTextBased?.() || !channel.createWebhook) continue;
-    const existingHooks = await channel.fetchWebhooks().catch(() => new Collection());
-    if (!existingHooks.some(h => h.name === hook.name)) await channel.createWebhook({ name: hook.name, reason: `STAK backup restore ${backup.id}` }).catch(() => {});
-  }
-  // Restore missing emojis and stickers when Discord permissions and source URLs allow it. Existing resources are left untouched.
-  for (const emoji of s.emojis || []) {
-    if (guild.emojis.cache.some(e => e.name === emoji.name && e.animated === emoji.animated)) continue;
-    if (emoji.url && emoji.name) await guild.emojis.create({ attachment: emoji.url, name: emoji.name, reason: `STAK backup restore ${backup.id}` }).catch(() => {});
-  }
-  for (const sticker of s.stickers || []) {
-    if (guild.stickers.cache.some(x => x.name === sticker.name)) continue;
-    if (sticker.url && sticker.name) await guild.stickers.create({ file: sticker.url, name: sticker.name, tags: sticker.tags || sticker.name, description: sticker.description || undefined, reason: `STAK backup restore ${backup.id}` }).catch(() => {});
-  }
-}
-
-
-async function verifyBackup(guild, backup) {
-  const s = backup.snapshot || {};
-  const missingRoles = (s.roles || []).filter(r => !r.managed && r.id !== guild.id && !guild.roles.cache.get(r.id) && !guild.roles.cache.some(x => x.name === r.name));
-  const missingChannels = (s.channels || []).filter(c => !guild.channels.cache.get(c.id) && !guild.channels.cache.some(x => x.type === c.type && x.name === c.name));
-  const missingEmojis = (s.emojis || []).filter(e => !guild.emojis.cache.some(x => x.name === e.name && x.animated === e.animated));
-  const missingStickers = (s.stickers || []).filter(st => !guild.stickers.cache.some(x => x.name === st.name));
-  const missingBans = [];
-  const bans = await guild.bans.fetch().catch(() => new Collection());
-  for (const b of s.bannedUsers || []) if (!bans.has(b.id)) missingBans.push(b);
-  return { missingRoles, missingChannels, missingEmojis, missingStickers, missingBans };
 }
 
 async function archiveMessage(message, deleted = false) {
@@ -740,18 +686,18 @@ function managementEmbed() {
 function managementRows() {
   return [
     new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('mgmt_logging').setLabel('Logger').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('mgmt_logging').setLabel('Logging').setStyle(ButtonStyle.Primary),
       new ButtonBuilder().setCustomId('mgmt_security').setLabel('Security').setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId('mgmt_backup').setLabel('Backup').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('mgmt_records').setLabel('Case Management').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('mgmt_staff').setLabel('Staff').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('mgmt_automation').setLabel('Automation').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('mgmt_backup').setLabel('Backups').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('mgmt_records').setLabel('Records').setStyle(ButtonStyle.Secondary),
     ),
     new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('mgmt_honeypot').setLabel('Honeypot').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('mgmt_roles').setLabel('Roles').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('mgmt_automation').setLabel('Booster').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('mgmt_youtube').setLabel('YouTube').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('mgmt_staff').setLabel('Staff').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('mgmt_giveaway').setLabel('Giveaway').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('mgmt_roles').setLabel('Roles').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('mgmt_youtube').setLabel('YouTube').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('mgmt_honeypot').setLabel('Honeypot').setStyle(ButtonStyle.Secondary),
     ),
   ];
 }
@@ -763,8 +709,7 @@ const commands = [
   new SlashCommandBuilder().setName('backup').setDescription('Manage server backups.').setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .addSubcommand(s => s.setName('create').setDescription('Create a manual full backup.'))
     .addSubcommand(s => s.setName('list').setDescription('List backups.'))
-    .addSubcommand(s => s.setName('restore').setDescription('Restore a backup.').addIntegerOption(o => o.setName('id').setDescription('Backup ID').setRequired(true)))
-    .addSubcommand(s => s.setName('verify').setDescription('Check what a backup would restore.').addIntegerOption(o => o.setName('id').setDescription('Backup ID').setRequired(true))),
+    .addSubcommand(s => s.setName('restore').setDescription('Restore a backup.').addIntegerOption(o => o.setName('id').setDescription('Backup ID').setRequired(true))),
   new SlashCommandBuilder().setName('giveaway').setDescription('Create a giveaway.'),
   new SlashCommandBuilder().setName('giveaway-access').setDescription('Configure giveaway creator roles.').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   new SlashCommandBuilder().setName('honeypot').setDescription('Configure the honeypot.').setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
@@ -778,7 +723,7 @@ async function registerCommands() {
 }
 
 function modalInput(id, label, style = TextInputStyle.Short, required = true, value = '') {
-  return new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(id).setLabel(label).setStyle(style).setRequired(required).setValue(value).setMaxLength(style === TextInputStyle.Paragraph ? 4000 : 400));
+  return new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(id).setLabel(label).setStyle(style).setRequired(required).setValue(value).setMaxLength(style === TextInputStyle.Paragraph ? 4000 : 1000));
 }
 
 function openCaseCreateModal(interaction, playerId) {
@@ -788,7 +733,7 @@ function openCaseCreateModal(interaction, playerId) {
     modalInput('reason', 'Reason', TextInputStyle.Paragraph),
     modalInput('evidence', 'Evidence', TextInputStyle.Paragraph, false),
     modalInput('case_type', 'Case Type (Warning/Ban/Kick/Note)'),
-    modalInput('duration', 'Duration (see instructions)', TextInputStyle.Short, false),
+    modalInput('duration', 'Duration (Permanent / 1 Day / 3 Days / 7 Days / 14 Days / 30 Days / 90 Days / 180 Days / 1 Year)', TextInputStyle.Short, false),
   );
   return interaction.showModal(modal);
 }
@@ -807,7 +752,6 @@ function playerEmbed(player, cases = []) {
     { name: 'Record ID', value: String(player.id), inline: true },
     { name: 'User ID', value: player.user_id || 'Not provided', inline: true },
     { name: 'Created', value: `<t:${Math.floor(new Date(player.created_at).getTime()/1000)}:F>`, inline: true },
-    { name: 'Total Cases', value: String(cases.length), inline: true },
     { name: 'Case History', value: caseText },
   );
 }
@@ -857,10 +801,8 @@ async function finishGiveaway(id) {
   }
   await q('UPDATE stak_giveaways SET ended=TRUE WHERE guild_id=$1 AND id=$2', [GUILD_ID, id]);
   if (channel?.isTextBased()) {
-    const mentions = winners.length ? winners.map(uid => `<@${uid}>`).join(', ') : 'No valid winners.';
+    const mentions = winners.length ? winners.map(id => `<@${id}>`).join(', ') : 'No valid winners.';
     await channel.send({ content: `Giveaway ended: **${g.prize}**\nWinners: ${mentions}` });
-    const msg = g.message_id ? await channel.messages.fetch(g.message_id).catch(() => null) : null;
-    if (msg) await msg.edit({ components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('giveaway_ended').setLabel(`Ended • ${entrants.length} Participants`).setStyle(ButtonStyle.Secondary).setDisabled(true))] }).catch(() => {});
   }
 }
 
@@ -925,37 +867,26 @@ async function pollYouTube() {
   }
 }
 
+function inviteUrl(message) {
+  return `https://discord.com/channels/${message.guild.id}/${message.channel.id}`;
+}
 
 async function handleHoneypot(message) {
   const settings = await getSettings();
   if (!settings.honeypot.enabled || settings.honeypot.channelId !== message.channelId) return false;
   if (!(await canAutomod(message.member))) return true;
   const inviteChannel = await client.channels.fetch(settings.honeypot.inviteChannelId || message.channelId).catch(() => null);
-  let invite = null;
+  let invite = inviteUrl(message);
   if (inviteChannel?.isTextBased()) {
-    try {
-      const inv = await inviteChannel.createInvite({ maxAge: 86400, maxUses: 1, unique: true, reason: 'STAK Honeypot rejoin invite' });
-      invite = inv.url;
-    } catch (error) {
-      console.error('Honeypot invite creation failed:', error.message);
-    }
+    try { const inv = await inviteChannel.createInvite({ maxAge: 86400, maxUses: 1, unique: true, reason: 'STAK Honeypot rejoin invite' }); invite = inv.url; } catch {}
   }
-  try {
-    await message.author.send(invite
-      ? `You triggered the STAK honeypot. If this was accidental, you can rejoin using this invite: ${invite}`
-      : 'You triggered the STAK honeypot. The server could not create a rejoin invite automatically. Please contact the server staff if this was accidental.');
-  } catch {}
+  try { await message.author.send(`You triggered the STAK honeypot. If this was accidental, you can rejoin using this invite: ${invite}`); } catch {}
   await message.delete().catch(() => {});
   try { await message.guild.members.ban(message.author.id, { deleteMessageSeconds: 86400, reason: 'STAK Honeypot softban' }); } catch {}
   await message.guild.members.unban(message.author.id, 'STAK Honeypot softban release').catch(() => {});
   settings.honeypot.softbans = Number(settings.honeypot.softbans || 0) + 1;
   await saveSettings(settings);
-  if (settings.honeypot.logChannelId) {
-    const logChannel = await client.channels.fetch(settings.honeypot.logChannelId).catch(() => null);
-    if (logChannel?.isTextBased()) await logChannel.send({ embeds: [new EmbedBuilder().setTitle('Honeypot Softban').setDescription(`<@${message.author.id}> was softbanned for sending a message in the honeypot.`).addFields({ name: 'Softbans', value: String(settings.honeypot.softbans), inline: true }).setTimestamp()] }).catch(() => {});
-  } else {
-    await sendLog('mod', 'Honeypot Softban', `<@${message.author.id}> was softbanned for sending a message in the honeypot.`, [{ name: 'Softbans', value: String(settings.honeypot.softbans) }]);
-  }
+  await sendLog('mod', 'Honeypot Softban', `<@${message.author.id}> was softbanned for sending a message in the honeypot.`, [{ name: 'Softbans', value: String(settings.honeypot.softbans) }]);
   await refreshHoneypotPanel(message.guild);
   return true;
 }
@@ -965,17 +896,12 @@ async function refreshHoneypotPanel(guild) {
   if (!settings.honeypot.channelId) return;
   const channel = await client.channels.fetch(settings.honeypot.channelId).catch(() => null);
   if (!channel?.isTextBased()) return;
-  const count = Number(settings.honeypot.softbans || 0);
-  const embed = new EmbedBuilder()
-    .setTitle('DO NOT SEND MESSAGES IN THIS CHANNEL')
-    .setDescription('This channel is dedicated to identifying spam and automated accounts. Any message sent here may trigger an automatic soft ban.')
-    .addFields({ name: 'Status', value: 'Messages sent here may trigger an automatic soft ban.', inline: false });
-  const counter = new ButtonBuilder().setCustomId('honeypot_counter').setLabel(`Softbans: ${Math.min(count, 999999)}`).setStyle(ButtonStyle.Secondary).setDisabled(true);
+  const embed = new EmbedBuilder().setTitle('DO NOT SEND MESSAGES IN THIS CHANNEL').setDescription('This channel is dedicated to identifying spam and automated accounts. Any message sent here may trigger an automatic soft ban.').addFields({ name: 'Softbans', value: String(settings.honeypot.softbans || 0), inline: true }).setTimestamp();
   if (settings.honeypot.panelMessageId) {
     const message = await channel.messages.fetch(settings.honeypot.panelMessageId).catch(() => null);
-    if (message) return message.edit({ embeds: [embed], components: [new ActionRowBuilder().addComponents(counter)] }).catch(() => {});
+    if (message) return message.edit({ embeds: [embed] }).catch(() => {});
   }
-  const sent = await channel.send({ embeds: [embed], components: [new ActionRowBuilder().addComponents(counter)] }).catch(() => null);
+  const sent = await channel.send({ embeds: [embed] }).catch(() => null);
   if (sent) { settings.honeypot.panelMessageId = sent.id; await saveSettings(settings); }
 }
 
@@ -1100,10 +1026,9 @@ client.once('ready', async () => {
 });
 
 client.on('messageCreate', async message => {
-  if (!message.guild || message.author.id === client.user?.id) return;
+  if (!message.guild || message.author.bot) return;
   await archiveMessage(message);
   if (await handleHoneypot(message)) return;
-  if (message.author.bot) return;
   if (await inviteProtection(message)) return;
   await antiSpam(message);
 });
@@ -1215,81 +1140,6 @@ client.on('emojiUpdate', () => markBackupRelevantChange('emoji update').catch(co
 client.on('inviteCreate', () => markBackupRelevantChange('invite create').catch(console.error));
 client.on('inviteDelete', () => markBackupRelevantChange('invite delete').catch(console.error));
 client.on('guildUpdate', () => markBackupRelevantChange('server update').catch(console.error));
-client.on('threadCreate', () => markBackupRelevantChange('thread create').catch(console.error));
-client.on('threadDelete', () => markBackupRelevantChange('thread delete').catch(console.error));
-client.on('threadUpdate', () => markBackupRelevantChange('thread update').catch(console.error));
-
-async function loggerPanel() {
-  const s = await getSettings();
-  const e = s.logging.events || {};
-  const disabled = Object.entries(e).filter(([,v]) => v === false).map(([k]) => k);
-  return new EmbedBuilder().setTitle('Logger Configuration').setDescription(
-    `Mod Logs: ${s.logging.modChannelId ? `<#${s.logging.modChannelId}>` : '**Not configured**'}\n`+
-    `Audit Logs: ${s.logging.auditChannelId ? `<#${s.logging.auditChannelId}>` : '**Not configured**'}\n`+
-    `Community Logs: ${s.logging.communityChannelId ? `<#${s.logging.communityChannelId}>` : '**Not configured**'}\n\n`+
-    `Disabled events: ${disabled.length ? disabled.join(', ') : 'None'}`
-  );
-}
-
-function loggerRows() {
-  return [
-    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('set_mod_log').setChannelTypes(ChannelType.GuildText).setPlaceholder('Set Mod Logs Channel')),
-    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('set_audit_log').setChannelTypes(ChannelType.GuildText).setPlaceholder('Set Audit Logs Channel')),
-    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('set_community_log').setChannelTypes(ChannelType.GuildText).setPlaceholder('Set Community Logs Channel')),
-    new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('logging_events').setLabel('Edit Event Toggles').setStyle(ButtonStyle.Secondary)),
-  ];
-}
-
-async function staffManagementReply(interaction) {
-  const embed = await staffOverviewEmbed();
-  const rows = [
-    new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('staff_in').setLabel('Go In Duty').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('staff_break').setLabel('Break').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('staff_out').setLabel('Go Out Duty').setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId('staff_refresh').setLabel('Refresh').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('staff_feedback').setLabel('Private Feedback').setStyle(ButtonStyle.Primary),
-    ),
-    new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('staff_logout_all').setLabel('Logout All Staff').setStyle(ButtonStyle.Danger)),
-  ];
-  return interaction.reply({ embeds: [embed], components: rows, ephemeral: true });
-}
-
-function giveawayModeRows() {
-  return [new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('giveaway_mode:raffle').setLabel('Raffle Giveaway').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId('giveaway_mode:quick').setLabel('Quick Win Giveaway').setStyle(ButtonStyle.Success),
-  )];
-}
-
-async function youtubeManagementReply(interaction) {
-  const rows = await youtubeRows();
-  const text = rows.length ? rows.map(r => `**${r.display_name}** — YouTube ID \`${r.youtube_id}\` → <#${r.discord_channel_id}>${r.ping_role_id ? ` • <@&${r.ping_role_id}>` : ''}`).join('\n') : 'No YouTube channels configured.';
-  const s = await getSettings();
-  const embed = new EmbedBuilder().setTitle('YouTube Notifications').setDescription(text).addFields({ name: 'Template', value: truncate(s.youtube.template, 1024) });
-  return interaction.reply({ embeds: [embed], components: [new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('youtube_add_button').setLabel('Add Channel').setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId('youtube_template_button').setLabel('Edit Template').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId('youtube_refresh_button').setLabel('Refresh').setStyle(ButtonStyle.Primary),
-  )], ephemeral: true });
-}
-
-async function honeypotManagementReply(interaction) {
-  const s = await getSettings();
-  const e = new EmbedBuilder().setTitle('Honeypot Configuration').setDescription(
-    `Enabled: **${s.honeypot.enabled ? 'Yes' : 'No'}**\n`+
-    `Honeypot Channel: ${s.honeypot.channelId ? `<#${s.honeypot.channelId}>` : '**Not configured**'}\n`+
-    `Mod Log Channel: ${s.honeypot.logChannelId ? `<#${s.honeypot.logChannelId}>` : 'Uses Mod Logs'}\n`+
-    `Invite Channel: ${s.honeypot.inviteChannelId ? `<#${s.honeypot.inviteChannelId}>` : 'Honeypot Channel'}\n`+
-    `Softbans: **${Number(s.honeypot.softbans || 0)}**`
-  );
-  return interaction.reply({ embeds: [e], components: [
-    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('set_honeypot_channel').setChannelTypes(ChannelType.GuildText).setPlaceholder('Set Honeypot Channel')),
-    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('set_honeypot_log').setChannelTypes(ChannelType.GuildText).setPlaceholder('Set Honeypot Log Channel')),
-    new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('set_honeypot_invite').setChannelTypes(ChannelType.GuildText).setPlaceholder('Set Invite Channel')),
-    new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('honeypot_refresh').setLabel('Refresh Panel').setStyle(ButtonStyle.Primary)),
-  ], ephemeral: true });
-}
 
 client.on('interactionCreate', async interaction => {
   try {
@@ -1299,13 +1149,17 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ embeds: [managementEmbed()], components: managementRows(), ephemeral: true });
       }
       if (interaction.commandName === 'staffpanel') {
-        if (!isStaffAccess(interaction)) return interaction.reply({ content: 'Staff permission required.', ephemeral: true });
-        return staffManagementReply(interaction);
+        const embed = await staffOverviewEmbed();
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('staff_in').setLabel('Go In Duty').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId('staff_break').setLabel('Break').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId('staff_out').setLabel('Go Out Duty').setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId('staff_feedback').setLabel('Private Feedback').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId('staff_refresh').setLabel('Refresh').setStyle(ButtonStyle.Secondary),
+        );
+        return interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
       }
-      if (interaction.commandName === 'casepanel') {
-        if (!isStaffAccess(interaction)) return interaction.reply({ content: 'Staff permission required.', ephemeral: true });
-        return showCasePanel(interaction);
-      }
+      if (interaction.commandName === 'casepanel') return showCasePanel(interaction);
       if (interaction.commandName === 'backup') {
         if (!isAdmin(interaction)) return interaction.reply({ content: 'Administrator permission required.', ephemeral: true });
         const sub = interaction.options.getSubcommand();
@@ -1324,20 +1178,14 @@ client.on('interactionCreate', async interaction => {
           const backup = await getBackup(interaction.options.getInteger('id', true));
           if (!backup) return interaction.editReply('Backup not found.');
           await restoreBackup(interaction.guild, backup);
-          return interaction.editReply(`Backup **#${backup.id}** restored. Existing resources were left untouched; only missing resources were recreated where Discord allows it.`);
-        }
-        if (sub === 'verify') {
-          const backup = await getBackup(interaction.options.getInteger('id', true));
-          if (!backup) return interaction.reply({ content: 'Backup not found.', ephemeral: true });
-          const result = await verifyBackup(interaction.guild, backup);
-          return interaction.reply({ embeds: [new EmbedBuilder().setTitle(`Backup Verification #${backup.id}`).setDescription(`Missing roles: **${result.missingRoles.length}**\nMissing channels: **${result.missingChannels.length}**\nMissing emojis: **${result.missingEmojis.length}**\nMissing stickers: **${result.missingStickers.length}**\nMissing bans: **${result.missingBans.length}**\n\nA restore will only attempt to recreate missing resources.`)], ephemeral: true });
+          return interaction.editReply(`Backup **#${backup.id}** restored. Discord API limitations mean historical messages cannot be recreated as their original authors.`);
         }
       }
       if (interaction.commandName === 'giveaway') {
         const settings = await getSettings();
         const allowed = isAdmin(interaction) || settings.giveaway.allowedRoleIds.some(id => interaction.member.roles.cache.has(id));
         if (!allowed) return interaction.reply({ content: 'You are not allowed to create giveaways.', ephemeral: true });
-        return interaction.reply({ content: 'Choose the giveaway mode.', components: giveawayModeRows(), ephemeral: true });
+        return createGiveaway(interaction);
       }
       if (interaction.commandName === 'staff-logout-all') {
         if (!isAdmin(interaction)) return interaction.reply({ content: 'Administrator permission required.', ephemeral: true });
@@ -1349,14 +1197,29 @@ client.on('interactionCreate', async interaction => {
         const menu = new RoleSelectMenuBuilder().setCustomId('giveaway_access_roles').setPlaceholder('Select allowed giveaway creator roles').setMinValues(0).setMaxValues(10);
         return interaction.reply({ content: 'Select all roles that may create giveaways. Administrators always have access.', components: [new ActionRowBuilder().addComponents(menu)], ephemeral: true });
       }
-      if (interaction.commandName === 'youtube') return youtubeManagementReply(interaction);
-
-      if (interaction.commandName === 'honeypot') return honeypotManagementReply(interaction);
+      if (interaction.commandName === 'youtube') {
+        const modal = new ModalBuilder().setCustomId('youtube_add').setTitle('Add YouTube Channel');
+        modal.addComponents(modalInput('youtube_id','YouTube Channel ID'), modalInput('display_name','YouTube Display Name'), modalInput('discord_channel_id','Discord Target Channel ID'), modalInput('ping_role_id','Optional Ping Role ID',TextInputStyle.Short,false));
+        return interaction.showModal(modal);
+      }
+      if (interaction.commandName === 'honeypot') {
+        const settings = await getSettings();
+        const modal = new ModalBuilder().setCustomId('honeypot_config').setTitle('Honeypot Configuration');
+        modal.addComponents(modalInput('channel_id','Honeypot Channel ID',TextInputStyle.Short,true,settings.honeypot.channelId || ''), modalInput('log_channel_id','Log Channel ID',TextInputStyle.Short,false,settings.honeypot.logChannelId || ''), modalInput('invite_channel_id','Invite Channel ID',TextInputStyle.Short,false,settings.honeypot.inviteChannelId || ''));
+        return interaction.showModal(modal);
+      }
     }
 
     if (interaction.isButton()) {
       if (interaction.customId === 'mgmt_logging') {
-        return interaction.reply({ embeds: [await loggerPanel()], components: loggerRows(), ephemeral: true });
+        const embed = new EmbedBuilder().setTitle('Logging Configuration').setDescription('Choose the channel for each log category. Event toggles are stored in PostgreSQL and survive code updates.');
+        const rows = [
+          new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('set_mod_log').setChannelTypes(ChannelType.GuildText).setPlaceholder('Set Mod Logs Channel')),
+          new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('set_audit_log').setChannelTypes(ChannelType.GuildText).setPlaceholder('Set Audit Logs Channel')),
+          new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('set_community_log').setChannelTypes(ChannelType.GuildText).setPlaceholder('Set Community Logs Channel')),
+          new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('logging_events').setLabel('Edit Event Toggles').setStyle(ButtonStyle.Secondary)),
+        ];
+        return interaction.reply({ embeds: [embed], components: rows, ephemeral: true });
       }
       if (interaction.customId === 'logging_events') {
         const s = await getSettings();
@@ -1378,21 +1241,14 @@ client.on('interactionCreate', async interaction => {
         return interaction.update({ content: `STAK automated security is now **${next ? 'enabled' : 'disabled'}**.`, embeds: [], components: [] });
       }
       if (interaction.customId === 'mgmt_automation') {
-        const s = await getSettings();
-        return interaction.reply({ embeds: [new EmbedBuilder().setTitle('Booster Automation').setDescription(`Enabled: **${s.booster.enabled ? 'Yes' : 'No'}**\nTarget: ${s.booster.channelId ? `<#${s.booster.channelId}>` : '**Not configured**'}\n\nA setup test message is sent immediately when the channel is selected.`)], components: [new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('set_booster_channel').setChannelTypes(ChannelType.GuildText).setPlaceholder('Set Booster Message Channel'))], ephemeral: true });
+        const row = new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('set_booster_channel').setChannelTypes(ChannelType.GuildText).setPlaceholder('Set Booster Message Channel'));
+        return interaction.reply({ content: 'Configure the Booster Message channel. A test message is sent immediately after setting it.', components: [row], ephemeral: true });
       }
       if (interaction.customId === 'mgmt_backup') {
         const rows = await listBackups();
         const text = rows.length ? rows.map(r => `**#${r.id}** • ${r.kind} • ${r.label || 'No label'} • <t:${Math.floor(new Date(r.created_at).getTime()/1000)}:R>`).join('\n') : 'No backups found.';
-        const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('backup_now').setLabel('Create Backup Now').setStyle(ButtonStyle.Success), new ButtonBuilder().setCustomId('backup_verify_latest').setLabel('Verify Latest').setStyle(ButtonStyle.Primary));
+        const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('backup_now').setLabel('Create Backup Now').setStyle(ButtonStyle.Success));
         return interaction.reply({ embeds: [new EmbedBuilder().setTitle('Backup Management').setDescription(text)], components: [row], ephemeral: true });
-      }
-      if (interaction.customId === 'backup_verify_latest') {
-        if (!isAdmin(interaction)) return interaction.reply({ content: 'Administrator permission required.', ephemeral: true });
-        const latest = await one('SELECT * FROM stak_backups WHERE guild_id=$1 ORDER BY created_at DESC LIMIT 1', [GUILD_ID]);
-        if (!latest) return interaction.reply({ content: 'No backup exists yet.', ephemeral: true });
-        const result = await verifyBackup(interaction.guild, latest);
-        return interaction.reply({ content: `Backup **#${latest.id}** verification: ${result.missingRoles.length} missing roles, ${result.missingChannels.length} missing channels, ${result.missingEmojis.length} missing emojis, ${result.missingStickers.length} missing stickers, ${result.missingBans.length} missing bans.`, ephemeral: true });
       }
       if (interaction.customId === 'backup_now') {
         if (!isAdmin(interaction)) return interaction.reply({ content: 'Administrator permission required.', ephemeral: true });
@@ -1401,31 +1257,18 @@ client.on('interactionCreate', async interaction => {
         return interaction.followUp({ content: `Backup **#${b.id}** created.`, ephemeral: true });
       }
       if (interaction.customId === 'mgmt_records') return showCasePanel(interaction);
-      if (interaction.customId === 'mgmt_staff') return staffManagementReply(interaction);
-      if (interaction.customId === 'mgmt_giveaway') {
-        const settings = await getSettings();
-        const roles = settings.giveaway.allowedRoleIds?.length ? settings.giveaway.allowedRoleIds.map(id => `<@&${id}>`).join(', ') : 'No role configured';
-        return interaction.reply({ embeds: [new EmbedBuilder().setTitle('Giveaway Management').setDescription(`Creator Roles: ${roles}\nAdministrators always have access.`)], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('giveaway_access_button').setLabel('Set Creator Roles').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId('giveaway_create_button').setLabel('Create Giveaway').setStyle(ButtonStyle.Success))], ephemeral: true });
-      }
+      if (interaction.customId === 'mgmt_staff') return interaction.reply({ content: 'Use `/staffpanel` for staff duty and feedback, and `/staff-logout-all` for administrator logout-all.', ephemeral: true });
+      if (interaction.customId === 'mgmt_giveaway') return interaction.reply({ content: 'Use `/giveaway` to create a giveaway. Allowed creator roles are stored in PostgreSQL.', ephemeral: true });
       if (interaction.customId === 'mgmt_roles') {
-        const s = await getSettings();
-        const embed = new EmbedBuilder().setTitle('Role Configuration').setDescription(`Community Member Role: ${s.roles.communityMemberRoleId ? `<@&${s.roles.communityMemberRoleId}>` : '**Not configured**'}\nProtected Bot Role: ${s.roles.botRoleId ? `<@&${s.roles.botRoleId}>` : '**Not configured**'}\n\nThe Community Member role is assigned to every new member, including bots. The protected Bot Role is exempt from STAK automated moderation.`);
         const row = new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('set_community_role').setPlaceholder('Set Community Member Role').setMinValues(1).setMaxValues(1));
         const row2 = new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId('set_bot_role').setPlaceholder('Set Protected Bot Role').setMinValues(1).setMaxValues(1));
-        return interaction.reply({ embeds: [embed], components: [row,row2], ephemeral: true });
+        return interaction.reply({ content: 'Configure the Community Member role and the protected Bot Role. The protected role exempts members from STAK automated moderation.', components: [row,row2], ephemeral: true });
       }
-      if (interaction.customId === 'mgmt_youtube') return youtubeManagementReply(interaction);
-      if (interaction.customId === 'mgmt_honeypot') return honeypotManagementReply(interaction);
-      if (interaction.customId === 'staff_logout_all') {
-        if (!isAdmin(interaction)) return interaction.reply({ content: 'Administrator permission required.', ephemeral: true });
-        const rows = (await q('SELECT * FROM stak_staff WHERE guild_id=$1', [GUILD_ID])).rows;
-        for (const row of rows) {
-          const d = row.data || {};
-          if (d.inDuty && !d.onBreak) addShiftTime(d);
-          d.inDuty = false; d.onBreak = false; d.shiftStart = null; d.dutyStartedAt = null;
-          await setStaffData(row.user_id, row.username, d);
-        }
-        return interaction.update({ embeds: [await staffOverviewEmbed()] });
+      if (interaction.customId === 'mgmt_youtube') return interaction.reply({ content: 'YouTube channel entries are stored persistently in PostgreSQL. Use `/youtube` as the configuration entry point.', ephemeral: true });
+      if (interaction.customId === 'mgmt_honeypot') {
+        const row = new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('set_honeypot_channel').setChannelTypes(ChannelType.GuildText).setPlaceholder('Set Honeypot Channel'));
+        const row2 = new ActionRowBuilder().addComponents(new ChannelSelectMenuBuilder().setCustomId('set_honeypot_log').setChannelTypes(ChannelType.GuildText).setPlaceholder('Set Honeypot Log Channel'));
+        return interaction.reply({ content: 'Configure the Honeypot channel and log channel.', components: [row,row2], ephemeral: true });
       }
       if (interaction.customId === 'staff_in' || interaction.customId === 'staff_break' || interaction.customId === 'staff_out') {
         const row = await getStaff(interaction.user.id, interaction.user.tag); const d = row.data || {};
@@ -1441,38 +1284,6 @@ client.on('interactionCreate', async interaction => {
         modal.addComponents(modalInput('feedback', 'Your feedback', TextInputStyle.Paragraph));
         return interaction.showModal(modal);
       }
-      if (interaction.customId === 'giveaway_access_button') {
-        const menu = new RoleSelectMenuBuilder().setCustomId('giveaway_access_roles').setPlaceholder('Select allowed giveaway creator roles').setMinValues(0).setMaxValues(10);
-        return interaction.reply({ content: 'Select all roles that may create giveaways. Administrators always have access.', components: [new ActionRowBuilder().addComponents(menu)], ephemeral: true });
-      }
-      if (interaction.customId === 'giveaway_create_button') {
-        return interaction.reply({ content: 'Choose the giveaway mode.', components: giveawayModeRows(), ephemeral: true });
-      }
-      if (interaction.customId === 'giveaway_mode:raffle' || interaction.customId === 'giveaway_mode:quick') {
-        const mode = interaction.customId.endsWith('quick') ? 'quick' : 'raffle';
-        const modal = new ModalBuilder().setCustomId(`giveaway_create:${mode}`).setTitle(mode === 'quick' ? 'Create Quick Win' : 'Create Giveaway');
-        modal.addComponents(
-          modalInput('prize', 'Prize'),
-          modalInput('winners', 'Number of Winners'),
-          modalInput('duration', 'Duration (e.g. 1h, 30m, 2d)'),
-          modalInput('description', 'Description', TextInputStyle.Paragraph, false),
-          modalInput('requirements', 'Requirements', TextInputStyle.Paragraph, false),
-        );
-        return interaction.showModal(modal);
-      }
-      if (interaction.customId === 'youtube_add_button') {
-        const modal = new ModalBuilder().setCustomId('youtube_add').setTitle('Add YouTube Channel');
-        modal.addComponents(modalInput('youtube_id','YouTube Channel ID'), modalInput('display_name','YouTube Display Name'), modalInput('discord_channel_id','Discord Target Channel ID'), modalInput('ping_role_id','Optional Ping Role ID',TextInputStyle.Short,false));
-        return interaction.showModal(modal);
-      }
-      if (interaction.customId === 'youtube_template_button') {
-        const s = await getSettings();
-        const modal = new ModalBuilder().setCustomId('youtube_template').setTitle('Edit YouTube Template');
-        modal.addComponents(modalInput('template','Message Template',TextInputStyle.Paragraph,true,s.youtube.template));
-        return interaction.showModal(modal);
-      }
-      if (interaction.customId === 'youtube_refresh_button') return youtubeManagementReply(interaction);
-      if (interaction.customId === 'honeypot_refresh') return honeypotManagementReply(interaction);
       if (interaction.customId === 'case_create_player') {
         const modal = new ModalBuilder().setCustomId('player_create').setTitle('Create Player Record');
         modal.addComponents(modalInput('username','Username'), modalInput('user_id','User ID',TextInputStyle.Short,false));
@@ -1495,7 +1306,6 @@ client.on('interactionCreate', async interaction => {
       if (interaction.customId === 'set_community_log') await patchSettings({ logging: { communityChannelId: id } });
       if (interaction.customId === 'set_honeypot_channel') { await patchSettings({ honeypot: { enabled: true, channelId: id } }); await refreshHoneypotPanel(interaction.guild); }
       if (interaction.customId === 'set_honeypot_log') await patchSettings({ honeypot: { logChannelId: id } });
-      if (interaction.customId === 'set_honeypot_invite') await patchSettings({ honeypot: { inviteChannelId: id } });
       if (interaction.customId === 'set_booster_channel') { const settings = await patchSettings({ booster: { enabled: true, channelId: id } }); const channel = await client.channels.fetch(id).catch(() => null); if (channel?.isTextBased()) await channel.send({ content: 'STAK Booster Messages are configured successfully. This is the automatic setup test message.' }); }
       return interaction.reply({ content: 'Configuration saved.', ephemeral: true });
     }
@@ -1520,17 +1330,6 @@ client.on('interactionCreate', async interaction => {
         const modal = new ModalBuilder().setCustomId(`case_edit_modal:${caseId}`).setTitle(`Edit Case #${c.case_number}`);
         modal.addComponents(modalInput('game_server','Game / Server',TextInputStyle.Short,true,c.game_server), modalInput('reason','Reason',TextInputStyle.Paragraph,true,c.reason), modalInput('evidence','Evidence',TextInputStyle.Paragraph,false,c.evidence || ''));
         return interaction.showModal(modal);
-      }
-      if (interaction.customId === 'player_search_pick') {
-        const player = await getPlayer(Number(interaction.values[0]));
-        if (!player) return interaction.update({ content: 'Player Record not found.', components: [] });
-        const cases = await getCases(player.id);
-        const buttons = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`player_add_case:${player.id}`).setLabel('Add Case').setStyle(ButtonStyle.Success),
-          new ButtonBuilder().setCustomId(`player_edit:${player.id}`).setLabel('Edit Player Record').setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder().setCustomId(`case_edit_picker:${player.id}`).setLabel('Edit Case').setStyle(ButtonStyle.Secondary),
-        );
-        return interaction.update({ content: '', embeds: [playerEmbed(player,cases)], components: [buttons] });
       }
       if (interaction.customId.startsWith('player_pick:')) {
         const action = interaction.customId.split(':')[1];
@@ -1581,8 +1380,7 @@ client.on('interactionCreate', async interaction => {
       if (interaction.customId === 'player_search') {
         const rows = await searchPlayers(interaction.fields.getTextInputValue('search').trim());
         if (!rows.length) return interaction.reply({ content: 'No matching Player Records found.', ephemeral: true });
-        const menu = new StringSelectMenuBuilder().setCustomId('player_search_pick').setPlaceholder('Select a Player Record').addOptions(rows.slice(0,25).map(p => ({ label: truncate(p.username,100), value: String(p.id), description: p.user_id ? `User ID: ${p.user_id}` : `Record #${p.id}` })));
-        return interaction.reply({ content: 'Select a Player Record to open it:', components: [new ActionRowBuilder().addComponents(menu)], ephemeral: true });
+        return interaction.reply({ embeds: [new EmbedBuilder().setTitle('Player Search').setDescription(rows.map(p => `**#${p.id}** — ${p.username}${p.user_id ? ` • ${p.user_id}` : ''}`).join('\n'))], ephemeral: true });
       }
       if (interaction.customId === 'logging_events_modal') {
         const settings = await getSettings();
@@ -1595,12 +1393,6 @@ client.on('interactionCreate', async interaction => {
         const settings = await getSettings(); const channelId = settings.logging.modChannelId;
         if (channelId) await sendLog('mod','Private Staff Feedback',`Feedback from <@${interaction.user.id}>.`,[{name:'Feedback',value:truncate(interaction.fields.getTextInputValue('feedback'),1024)}]);
         return interaction.reply({ content: 'Your feedback has been submitted privately.', ephemeral: true });
-      }
-      if (interaction.customId === 'youtube_template') {
-        const template = interaction.fields.getTextInputValue('template').trim();
-        if (!template) return interaction.reply({ content: 'The template cannot be empty.', ephemeral: true });
-        await patchSettings({ youtube: { template } });
-        return interaction.reply({ content: 'YouTube message template saved.', ephemeral: true });
       }
       if (interaction.customId === 'youtube_add') {
         const youtubeId = interaction.fields.getTextInputValue('youtube_id').trim();
@@ -1621,17 +1413,16 @@ client.on('interactionCreate', async interaction => {
         await refreshHoneypotPanel(interaction.guild);
         return interaction.reply({ content: 'Honeypot configuration saved and panel refreshed.', ephemeral: true });
       }
-      if (interaction.customId === 'giveaway_create' || interaction.customId.startsWith('giveaway_create:')) {
+      if (interaction.customId === 'giveaway_create') {
         const settings = await getSettings();
         const allowed = isAdmin(interaction) || settings.giveaway.allowedRoleIds.some(id => interaction.member.roles.cache.has(id));
         if (!allowed) return interaction.reply({content:'You are not allowed to create giveaways.',ephemeral:true});
         const prize = interaction.fields.getTextInputValue('prize').trim(); const winners = Number(interaction.fields.getTextInputValue('winners')); const duration = parseHumanDuration(interaction.fields.getTextInputValue('duration')); const description = interaction.fields.getTextInputValue('description') || ''; const requirements = interaction.fields.getTextInputValue('requirements') || '';
         if (!prize || !Number.isInteger(winners) || winners < 1 || !duration || duration < 1000) return interaction.reply({content:'Invalid giveaway values.',ephemeral:true});
         const ends = new Date(Date.now()+duration);
-        const mode = interaction.customId.split(':')[1] || 'raffle';
-        const row = await one(`INSERT INTO stak_giveaways(guild_id,channel_id,prize,winners,ends_at,description,requirements,mode,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`, [GUILD_ID,interaction.channelId,prize,winners,ends,description,requirements,mode,interaction.user.id]);
-        const embed = new EmbedBuilder().setTitle('Giveaway').setDescription(description || 'Join the giveaway using the button below.').addFields({name:'Prize',value:prize,inline:true},{name:'Winners',value:String(winners),inline:true},{name:'Ends',value:`<t:${Math.floor(ends.getTime()/1000)}:R>`,inline:true},{name:'Participants',value:'0',inline:true},{name:'Mode',value:mode === 'quick' ? 'Quick Win' : 'Raffle',inline:true},{name:'Requirements',value:requirements || 'None'}).setFooter({text:`Giveaway #${row.id}`});
-        const button = new ButtonBuilder().setCustomId(`giveaway_join:${row.id}`).setLabel(mode === 'quick' ? 'Claim Prize' : 'Enter Giveaway').setStyle(mode === 'quick' ? ButtonStyle.Success : ButtonStyle.Primary);
+        const row = await one(`INSERT INTO stak_giveaways(guild_id,channel_id,prize,winners,ends_at,description,requirements,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`, [GUILD_ID,interaction.channelId,prize,winners,ends,description,requirements,interaction.user.id]);
+        const embed = new EmbedBuilder().setTitle('Giveaway').setDescription(description || 'Join the giveaway using the button below.').addFields({name:'Prize',value:prize,inline:true},{name:'Winners',value:String(winners),inline:true},{name:'Ends',value:`<t:${Math.floor(ends.getTime()/1000)}:R>`,inline:true},{name:'Requirements',value:requirements || 'None'}).setFooter({text:`Giveaway #${row.id}`});
+        const button = new ButtonBuilder().setCustomId(`giveaway_join:${row.id}`).setLabel('Enter Giveaway').setStyle(ButtonStyle.Success);
         const sent = await interaction.channel.send({embeds:[embed],components:[new ActionRowBuilder().addComponents(button)]});
         await q('UPDATE stak_giveaways SET message_id=$1 WHERE id=$2',[sent.id,row.id]);
         setTimeout(()=>finishGiveaway(row.id).catch(console.error), Math.min(duration,2147483647));
@@ -1664,39 +1455,13 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (interaction.isButton() && interaction.customId.startsWith('giveaway_join:')) {
-      const id = Number(interaction.customId.split(':')[1]);
-      const g = await one('SELECT * FROM stak_giveaways WHERE guild_id=$1 AND id=$2 AND ended=FALSE', [GUILD_ID,id]);
+      const id = Number(interaction.customId.split(':')[1]); const g = await one('SELECT * FROM stak_giveaways WHERE guild_id=$1 AND id=$2 AND ended=FALSE',[GUILD_ID,id]);
       if (!g || new Date(g.ends_at).getTime() <= Date.now()) return interaction.reply({content:'This giveaway has ended.',ephemeral:true});
       const entrants = Array.isArray(g.entrants) ? g.entrants : [];
-      if (g.mode === 'quick') {
-        await q('UPDATE stak_giveaways SET ended=TRUE, entrants=$1 WHERE guild_id=$2 AND id=$3 AND ended=FALSE', [[interaction.user.id], GUILD_ID, id]);
-        const channel = await client.channels.fetch(g.channel_id).catch(() => null);
-        if (channel?.isTextBased()) {
-          await channel.send({ content: `Quick Win giveaway ended! **${g.prize}** was won by <@${interaction.user.id}>.` });
-          const msg = g.message_id ? await channel.messages.fetch(g.message_id).catch(() => null) : null;
-          if (msg) await msg.edit({ components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('giveaway_ended').setLabel('Winner Selected').setStyle(ButtonStyle.Secondary).setDisabled(true))] }).catch(() => {});
-        }
-        return interaction.reply({content:'Congratulations — you won the Quick Win giveaway!',ephemeral:true});
-      }
       if (entrants.includes(interaction.user.id)) return interaction.reply({content:'You are already entered.',ephemeral:true});
-      entrants.push(interaction.user.id);
-      await q('UPDATE stak_giveaways SET entrants=$1 WHERE guild_id=$2 AND id=$3',[entrants,GUILD_ID,id]);
-      const channel = await client.channels.fetch(g.channel_id).catch(() => null);
-      if (channel?.isTextBased() && g.message_id) {
-        const msg = await channel.messages.fetch(g.message_id).catch(() => null);
-        if (msg?.embeds?.[0]) {
-          const old = msg.embeds[0];
-          const eb = EmbedBuilder.from(old);
-          const fields = (old.fields || []).map(f => f.name === 'Participants' ? { name: 'Participants', value: String(entrants.length), inline: f.inline } : f);
-          eb.setFields(fields);
-          await msg.edit({ embeds: [eb] }).catch(() => {});
-        }
-        const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`giveaway_join:${id}`).setLabel(`Enter Giveaway • ${entrants.length}`).setStyle(ButtonStyle.Primary));
-        await msg.edit({ components: [row] }).catch(() => {});
-      }
-      return interaction.reply({content:`You have entered the giveaway. Current participants: **${entrants.length}**.`,ephemeral:true});
+      entrants.push(interaction.user.id); await q('UPDATE stak_giveaways SET entrants=$1 WHERE id=$2',[entrants,id]);
+      return interaction.reply({content:'You have entered the giveaway.',ephemeral:true});
     }
-
   } catch (error) {
     console.error('Interaction error:', error);
     if (interaction.replied || interaction.deferred) await interaction.followUp({ content: 'An internal error occurred. Check the bot console for details.', ephemeral: true }).catch(() => {});
