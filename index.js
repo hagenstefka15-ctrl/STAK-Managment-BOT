@@ -1,5 +1,6 @@
 'use strict';
 
+require('dotenv').config();
 /**
  * STAK Management — Final
  * Node.js + discord.js v14 + PostgreSQL
